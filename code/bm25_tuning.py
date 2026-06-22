@@ -17,6 +17,7 @@ from config import (
     TOP_K,
 )
 from retrieval import SearchEngine
+from lexical_scoring import BM25Cache
 from evaluation import Evaluator
 from utils import setup_logger, save_json, load_json
 
@@ -114,6 +115,7 @@ def _metric_value(metrics, metric_name, k=TOP_K):
 
 def grid_search(
     index,
+    processed_docs,
     processed_queries,
     qrels,
     k1_grid=None,
@@ -140,7 +142,8 @@ def grid_search(
     )
 
     for i, (k1, b) in enumerate(combos, start=1):
-        engine = SearchEngine(index, bm25_k1=k1, bm25_b=b)
+        bm25_cache = BM25Cache.build(processed_docs, k1, b)
+        engine = SearchEngine(index, bm25_k1=k1, bm25_b=b, bm25_cache=bm25_cache)
         start = time.time()
         retrieval = engine.retrieve_batch(processed_queries, model="bm25", top_k=top_k)
         elapsed = round(time.time() - start, 3)
@@ -163,11 +166,16 @@ def grid_search(
     return results
 
 
-def analyze_query_buckets(index, processed_queries, qrels, best_k1, best_b, top_k=TOP_K):
+def analyze_query_buckets(
+    index, processed_docs, processed_queries, qrels, best_k1, best_b, top_k=TOP_K
+):
     """Measure tuned params per query-length bucket for query-dependent justification."""
     buckets = _bucket_queries(processed_queries)
     evaluator = Evaluator(qrels)
-    engine = SearchEngine(index, bm25_k1=best_k1, bm25_b=best_b)
+    bm25_cache = BM25Cache.build(processed_docs, best_k1, best_b)
+    engine = SearchEngine(
+        index, bm25_k1=best_k1, bm25_b=best_b, bm25_cache=bm25_cache
+    )
     analysis = {}
 
     for label, bucket_queries in buckets.items():
@@ -264,6 +272,7 @@ def build_justification(corpus_stats, grid_results, best_entry, defaults=None):
 
 def run_tuning(
     index,
+    processed_docs,
     processed_queries,
     qrels,
     k1_grid=None,
@@ -277,6 +286,7 @@ def run_tuning(
     corpus_stats = analyze_corpus(index, processed_queries)
     grid_results = grid_search(
         index,
+        processed_docs,
         processed_queries,
         qrels,
         k1_grid=k1_grid,
@@ -287,6 +297,7 @@ def run_tuning(
     best = grid_results[0]
     bucket_analysis = analyze_query_buckets(
         index,
+        processed_docs,
         processed_queries,
         qrels,
         best["k1"],

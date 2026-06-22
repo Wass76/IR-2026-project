@@ -62,12 +62,20 @@ VECTOR_INDEX_PATH = MODELS_DIR / "vector_index.faiss"
 VECTOR_DOC_IDS_PATH = MODELS_DIR / "vector_doc_ids.json"
 EMBEDDING_METADATA_PATH = MODELS_DIR / "embedding_metadata.json"
 
+# إعدادات تخزين الفهرس المعكوس و BM25 و TF-IDF
+REBUILD_LEXICAL_INDEX = False
+INVERTED_INDEX_PATH = MODELS_DIR / "inverted_index.pkl"
+BM25_CACHE_PATH = MODELS_DIR / "bm25_cache.pkl"
+TFIDF_CACHE_PATH = MODELS_DIR / "tfidf_cache.pkl"
+LEXICAL_INDEX_METADATA_PATH = MODELS_DIR / "lexical_index_metadata.json"
+
 # إعدادات الاسترجاع الهجين (Hybrid)
 HYBRID_SERIAL_CANDIDATES = 100   # عدد مرشحي BM25 قبل إعادة الترتيب بالتضمين
 HYBRID_PARALLEL_DEPTH = 100      # عمق كل مسار قبل الدمج في الوضع المتوازي
 RRF_K = 60                       # ثابت Reciprocal Rank Fusion
 HYBRID_FUSION_METHOD = "rrf"     # "rrf" أو "weighted"
 HYBRID_BM25_WEIGHT = 0.5         # وزن BM25 عند استخدام weighted fusion
+HYBRID_DENSE_WEIGHT = 0.5        # وزن Dense عند استخدام weighted fusion
 
 # إعدادات تحسين الاستعلام (Query Refinement)
 REFINEMENT_DIR = RESULTS_DIR / "refinement"
@@ -82,6 +90,9 @@ HISTORY_WINDOW = 50                # عدد الاستعلامات الأخير�
 # إعدادات واجهة API (SOA Gateway)
 API_HOST = "127.0.0.1"
 API_PORT = 8000
+
+# تخزين الوثائق الأصلية (SQLite)
+DOCUMENTS_DB_PATH = DATA_DIR / "documents.db"
 
 BASELINE_DIR.mkdir(parents=True, exist_ok=True)
 DENSE_DIR.mkdir(parents=True, exist_ok=True)

@@ -29,6 +29,18 @@ class SearchRequest(BaseModel):
     )
     top_k: int = Field(default=TOP_K, ge=1, le=100)
     use_refinement: bool = False
+    bm25_weight: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="BM25 weight for hybrid_parallel weighted fusion",
+    )
+    dense_weight: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Dense weight for hybrid_parallel weighted fusion",
+    )
 
 
 def create_app(ir_system=None):
@@ -94,15 +106,34 @@ def create_app(ir_system=None):
                 model=req.model,
                 top_k=req.top_k,
                 use_refinement=req.use_refinement,
+                bm25_weight=req.bm25_weight,
+                dense_weight=req.dense_weight,
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+    @app.get("/services/documents/{doc_id}")
+    def get_document(doc_id: str):
+        try:
+            system._ensure_loaded()
+            record = system.get_document(doc_id)
+            if record is None:
+                raise HTTPException(status_code=404, detail="Document not found")
+            return record
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
     @app.get("/services/evaluation/summary")
     def evaluation_summary():
         return IRSystem.latest_metrics()
+
+    @app.get("/services/hybrid/settings")
+    def hybrid_settings():
+        return IRSystem.get_hybrid_settings()
 
     @app.get("/services/bm25/params")
     def bm25_params():

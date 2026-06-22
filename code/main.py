@@ -6,21 +6,23 @@ from config import *
 from utils import setup_logger, save_json, load_json
 from data_loader import (
     load_dataset,
-    get_documents,
+    load_or_build_processed_corpus,
     get_queries,
     get_qrels,
     select_eval_queries,
 )
 from preprocessing import TextPreprocessor
-from indexing import InvertedIndex
+from index_cache import load_or_build_lexical_index
 from retrieval import SearchEngine, DenseSearchEngine, HybridSearchEngine
 from evaluation import Evaluator
 from embeddings import EmbeddingModel
 from vector_index import VectorIndex
 from bm25_tuning import run_tuning, save_tuned_params, load_tuned_params
 from query_refinement import QueryRefiner
+from document_store import DocumentStore
 
 logger = setup_logger("Main")
+document_store = DocumentStore()
 
 MAP_FORMULA = "standard AP: sum(precision@i * rel_i) / total_relevant, averaged over queries"
 
@@ -53,13 +55,37 @@ def _refinement_run_dir(max_docs):
     return run_dir
 
 
-def _make_search_engine(index):
+def _make_search_engine(index, bm25_cache=None, tfidf_cache=None):
     k1, b, tuned = load_tuned_params()
     if tuned:
         logger.info(f"Using tuned BM25 params: k1={k1}, b={b}")
     else:
         logger.info(f"Using default BM25 params: k1={k1}, b={b}")
-    return SearchEngine(index, bm25_k1=k1, bm25_b=b), k1, b
+    return (
+        SearchEngine(
+            index,
+            bm25_k1=k1,
+            bm25_b=b,
+            bm25_cache=bm25_cache,
+            tfidf_cache=tfidf_cache,
+        ),
+        k1,
+        b,
+    )
+
+
+def _load_lexical_index(processed_docs, preprocessor, max_docs):
+    k1, b, _ = load_tuned_params()
+    index, bm25_cache, tfidf_cache, _ = load_or_build_lexical_index(
+        processed_docs,
+        dataset_name=DATASET_NAME,
+        max_docs=max_docs,
+        preprocessor=preprocessor,
+        bm25_k1=k1,
+        bm25_b=b,
+    )
+    search_engine, k1, b = _make_search_engine(index, bm25_cache, tfidf_cache)
+    return index, search_engine, k1, b
 
 
 def _metrics_for_comparison(metrics):
@@ -137,7 +163,14 @@ def run_baseline(max_docs=None, max_eval_queries=None):
     logger.info("\n--- Phase 1: Loading data ---")
     phase_start = time.time()
     dataset = load_dataset(DATASET_NAME)
-    docs = get_documents(dataset, max_docs=max_docs)
+    preprocessor = TextPreprocessor(use_stemming=True)
+    docs, processed_docs, _, _ = load_or_build_processed_corpus(
+        document_store,
+        preprocessor,
+        dataset=dataset,
+        max_docs=max_docs,
+        dataset_name=DATASET_NAME,
+    )
     queries = get_queries(dataset)
     qrels = get_qrels(dataset)
 
@@ -148,13 +181,11 @@ def run_baseline(max_docs=None, max_eval_queries=None):
         random_seed=EVAL_RANDOM_SEED,
     )
 
-    preprocessor = TextPreprocessor(use_stemming=True)
-    processed_docs = preprocessor.process_collection(docs)
     processed_queries = preprocessor.process_collection(eval_queries)
 
-    index = InvertedIndex()
-    index.build(processed_docs)
-    search_engine, bm25_k1, bm25_b = _make_search_engine(index)
+    index, search_engine, bm25_k1, bm25_b = _load_lexical_index(
+        processed_docs, preprocessor, max_docs
+    )
     evaluator = Evaluator(qrels)
     timing["load_and_index"] = round(time.time() - phase_start, 3)
 
@@ -236,7 +267,14 @@ def run_dense_eval(max_docs=None, max_eval_queries=None, hybrid_type="both"):
     logger.info("\n--- Phase 1: Loading data ---")
     phase_start = time.time()
     dataset = load_dataset(DATASET_NAME)
-    docs = get_documents(dataset, max_docs=max_docs)
+    preprocessor = TextPreprocessor(use_stemming=True)
+    docs, processed_docs, _, _ = load_or_build_processed_corpus(
+        document_store,
+        preprocessor,
+        dataset=dataset,
+        max_docs=max_docs,
+        dataset_name=DATASET_NAME,
+    )
     queries = get_queries(dataset)
     qrels = get_qrels(dataset)
     eval_queries = select_eval_queries(
@@ -246,13 +284,11 @@ def run_dense_eval(max_docs=None, max_eval_queries=None, hybrid_type="both"):
         random_seed=EVAL_RANDOM_SEED,
     )
 
-    preprocessor = TextPreprocessor(use_stemming=True)
-    processed_docs = preprocessor.process_collection(docs)
     processed_queries = preprocessor.process_collection(eval_queries)
 
-    index = InvertedIndex()
-    index.build(processed_docs)
-    search_engine, bm25_k1, bm25_b = _make_search_engine(index)
+    index, search_engine, bm25_k1, bm25_b = _load_lexical_index(
+        processed_docs, preprocessor, max_docs
+    )
     timing["load_and_index"] = round(time.time() - phase_start, 3)
 
     logger.info("\n--- Phase 2: Vector index ---")
@@ -448,7 +484,14 @@ def run_bm25_tuning(max_docs=None, max_eval_queries=None):
 
     logger.info("\n--- Phase 1: Load data and build index ---")
     dataset = load_dataset(DATASET_NAME)
-    docs = get_documents(dataset, max_docs=max_docs)
+    preprocessor = TextPreprocessor(use_stemming=True)
+    docs, processed_docs, _, _ = load_or_build_processed_corpus(
+        document_store,
+        preprocessor,
+        dataset=dataset,
+        max_docs=max_docs,
+        dataset_name=DATASET_NAME,
+    )
     queries = get_queries(dataset)
     qrels = get_qrels(dataset)
     eval_queries = select_eval_queries(
@@ -458,15 +501,20 @@ def run_bm25_tuning(max_docs=None, max_eval_queries=None):
         random_seed=EVAL_RANDOM_SEED,
     )
 
-    preprocessor = TextPreprocessor(use_stemming=True)
-    processed_docs = preprocessor.process_collection(docs)
     processed_queries = preprocessor.process_collection(eval_queries)
 
-    index = InvertedIndex()
-    index.build(processed_docs)
+    k1, b, _ = load_tuned_params()
+    index, _, _, _ = load_or_build_lexical_index(
+        processed_docs,
+        dataset_name=DATASET_NAME,
+        max_docs=max_docs,
+        preprocessor=preprocessor,
+        bm25_k1=k1,
+        bm25_b=b,
+    )
 
     logger.info("\n--- Phase 2: Grid search ---")
-    report = run_tuning(index, processed_queries, qrels, top_k=TOP_K)
+    report = run_tuning(index, processed_docs, processed_queries, qrels, top_k=TOP_K)
 
     best = report["best_params"]
     save_json(report, run_dir / "bm25_tuning_report.json")
@@ -525,7 +573,14 @@ def run_refinement_eval(max_docs=None, max_eval_queries=None):
     logger.info("\n--- Phase 1: Load data and build index ---")
     phase_start = time.time()
     dataset = load_dataset(DATASET_NAME)
-    docs = get_documents(dataset, max_docs=max_docs)
+    preprocessor = TextPreprocessor(use_stemming=True)
+    docs, processed_docs, _, _ = load_or_build_processed_corpus(
+        document_store,
+        preprocessor,
+        dataset=dataset,
+        max_docs=max_docs,
+        dataset_name=DATASET_NAME,
+    )
     queries = get_queries(dataset)
     qrels = get_qrels(dataset)
     eval_queries = select_eval_queries(
@@ -535,13 +590,11 @@ def run_refinement_eval(max_docs=None, max_eval_queries=None):
         random_seed=EVAL_RANDOM_SEED,
     )
 
-    preprocessor = TextPreprocessor(use_stemming=True)
-    processed_docs = preprocessor.process_collection(docs)
     processed_queries = preprocessor.process_collection(eval_queries)
 
-    index = InvertedIndex()
-    index.build(processed_docs)
-    search_engine, bm25_k1, bm25_b = _make_search_engine(index)
+    index, search_engine, bm25_k1, bm25_b = _load_lexical_index(
+        processed_docs, preprocessor, max_docs
+    )
     evaluator = Evaluator(qrels)
     timing["load_and_index"] = round(time.time() - phase_start, 3)
 

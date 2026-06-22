@@ -10,10 +10,12 @@
 This project implements a complete **Information Retrieval (IR)** pipeline in Python, aligned with the **IR Project 2026** course requirements:
 
 - Data loading and preprocessing
-- **TF-IDF**, **BM25**, **Dense Embeddings**, **Hybrid (Serial & Parallel)**
+- **TF-IDF** (scikit-learn), **BM25** ([rank-bm25](https://github.com/dorianbrown/rank_bm25)), **Dense Embeddings**, **Hybrid (Serial & Parallel)**
 - BM25 parameter tuning with justification
 - Query refinement (spelling, PRF, history-based suggestions)
 - Evaluation: **MAP**, **Recall**, **Precision@10**, **nDCG@10**
+- **SQLite document persistence** (original + processed text)
+- **Disk caching** for fast API startup (documents, indexes, BM25, TF-IDF, FAISS)
 - **SOA** architecture with **REST API** and **Web UI**
 
 **Dataset:** [beir/quora/test](https://ir-datasets.com/) via `ir_datasets` (~523K documents, 10K test queries with qrels).  
@@ -28,23 +30,26 @@ IR-2026-project/
 ├── code/                          # Python source code
 │   ├── main.py                    # CLI entry point (all pipeline modes + API)
 │   ├── config.py                  # Global configuration
-│   ├── data_loader.py             # Load dataset, queries, qrels
+│   ├── data_loader.py             # Load dataset, queries, qrels, corpus helpers
+│   ├── document_store.py          # SQLite persistence (original + processed docs)
 │   ├── preprocessing.py           # Preprocessing Service
-│   ├── indexing.py                # Inverted index (lexical)
+│   ├── indexing.py                # Inverted index (lexical, for PRF/refinement)
+│   ├── index_cache.py             # Disk cache: inverted index, BM25, TF-IDF
+│   ├── lexical_scoring.py         # rank_bm25 + sklearn TF-IDF wrappers
 │   ├── vector_index.py            # FAISS vector index
 │   ├── embeddings.py              # Sentence-transformers encoder
-│   ├── retrieval.py               # TF-IDF, BM25, Dense, Hybrid retrieval
+│   ├── retrieval.py               # Search engines (lexical, dense, hybrid)
 │   ├── query_refinement.py        # Query Refinement Service
 │   ├── evaluation.py              # Evaluation metrics & comparison
 │   ├── bm25_tuning.py             # BM25 grid search & justification
 │   ├── api/app.py                 # FastAPI gateway (SOA)
 │   └── services/ir_system.py      # Service orchestrator for API/UI
 ├── frontend/
-│   └── index.html                 # Web search UI
+│   └── index.html                 # Web search UI (English)
 ├── docs/
 │   └── Architecture_Diagram.md    # SOA architecture diagrams (Mermaid)
-├── data/                          # Downloaded dataset (auto-created)
-├── models/                        # Cached indexes & tuned BM25 params
+├── data/                          # Dataset download + documents.db
+├── models/                        # Cached indexes, BM25/TF-IDF, FAISS, tuned params
 ├── results/                       # Evaluation JSON outputs
 ├── logs/                          # Run logs
 └── requirements.txt
@@ -54,7 +59,7 @@ IR-2026-project/
 
 ## Requirements | المتطلبات
 
-- **Python 3.10+** (tested on 3.13)
+- **Python 3.10+** (tested on 3.13 / 3.14)
 - Windows / Linux / macOS
 - ~8 GB RAM recommended for 200K-document runs
 - Internet on first run (dataset + embedding model download)
@@ -93,9 +98,27 @@ Edit `code/config.py`:
 | `MAX_EVAL_QUERIES` | `None` | Eval query cap (`None` = all 10K) |
 | `TOP_K` | `10` | Results per query |
 | `EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | Dense embedding model |
+| `DOCUMENTS_DB_PATH` | `data/documents.db` | SQLite document store |
+| `REBUILD_LEXICAL_INDEX` | `False` | Force rebuild inverted/BM25/TF-IDF caches |
+| `REBUILD_VECTOR_INDEX` | `False` | Force rebuild FAISS embeddings |
 | `API_HOST` / `API_PORT` | `127.0.0.1` / `8000` | Web API |
 
 Tuned BM25 parameters are saved to `models/bm25_params.json` after tuning.
+
+### Cached artifacts (`models/`)
+
+| File | Contents |
+|------|----------|
+| `documents.db` (in `data/`) | Original document text + processed tokens |
+| `inverted_index.pkl` | Inverted index (PRF / refinement) |
+| `bm25_cache.pkl` | `rank_bm25.BM25Okapi` model |
+| `tfidf_cache.pkl` | `TfidfVectorizer` + sparse matrix |
+| `lexical_index_metadata.json` | Corpus fingerprint for cache validation |
+| `vector_index.faiss` | Dense vector index |
+| `embedding_metadata.json` | FAISS cache metadata |
+| `bm25_params.json` | Tuned k1, b |
+
+Caches invalidate automatically when the corpus, preprocessing settings, or BM25 parameters change.
 
 ---
 
@@ -158,17 +181,20 @@ python main.py --mode api
 |-----|---------|
 | http://127.0.0.1:8000/ | Web search UI |
 | http://127.0.0.1:8000/docs | Swagger API documentation |
-| http://127.0.0.1:8000/health | System status |
+| http://127.0.0.1:8000/health | System status + cache flags |
 
 ### UI workflow
 
-1. Click **Load Index** (wait ~1–2 min for 200K docs if cache exists)
+1. Click **Load Index** (first run builds caches; later runs load from disk/SQLite)
 2. Enter a query, e.g. `What causes a nightmare?`
-3. Select model: **BM25** (recommended)
-4. Click **Search**
-5. Optionally check **Use query refinement** to compare expanded queries
+3. Select model: **BM25**, **TF-IDF**, **Dense**, **Hybrid Serial**, or **Hybrid Parallel**
+4. For **Hybrid Parallel**, adjust **BM25 Weight** / **Dense Weight** (weighted fusion)
+5. Click **Search** — results show **Doc ID**, score, and **full original document text**
+6. Optionally check **Use query refinement** or click **Preview Refinement**
 
-### API example
+### API examples
+
+**Search**
 
 ```bash
 POST http://127.0.0.1:8000/services/search
@@ -176,36 +202,101 @@ Content-Type: application/json
 
 {
   "query": "What causes a nightmare?",
-  "model": "bm25",
+  "model": "hybrid_parallel",
   "top_k": 10,
-  "use_refinement": false
+  "use_refinement": false,
+  "bm25_weight": 0.6,
+  "dense_weight": 0.4
 }
 ```
+
+**Get original document by ID**
+
+```bash
+GET http://127.0.0.1:8000/services/documents/{doc_id}
+```
+
+Returns `doc_id`, `original_content`, `processed_tokens` (if cached), and `metadata`.
 
 ### SOA Services
 
 | Service | REST Endpoint |
 |---------|---------------|
 | Indexing | `POST /services/index/load`, `GET /services/index/status` |
+| Documents | `GET /services/documents/{doc_id}` |
 | Preprocessing | `POST /services/preprocess` |
 | Query Refinement | `POST /services/refine` |
 | Retrieval | `POST /services/search` |
 | Evaluation | `GET /services/evaluation/summary` |
 | BM25 params | `GET /services/bm25/params` |
+| Hybrid settings | `GET /services/hybrid/settings` |
 
 Architecture diagrams: [`docs/Architecture_Diagram.md`](docs/Architecture_Diagram.md)
 
 ---
 
+## Document Persistence | تخزين الوثائق
+
+Original and processed documents are stored in **SQLite** (`data/documents.db`):
+
+| Column | Description |
+|--------|-------------|
+| `doc_id` | Document identifier |
+| `original_content` | Raw text from the corpus |
+| `processed_tokens` | JSON token list after preprocessing |
+| `metadata` | Dataset / corpus metadata |
+
+- **`get_document(doc_id)`** — returns full original text (+ processed tokens when available)
+- Search results include `full_content` loaded from the document store
+- On startup, documents and processed tokens load from SQLite when the corpus matches (no re-read from ir_datasets, no re-preprocessing)
+
+---
+
+## Startup & Caching | التخزين المؤقت وسرعة التشغيل
+
+Optimized API startup sequence:
+
+1. Load cached **documents** + **processed tokens** from SQLite
+2. Load cached **BM25** (`rank_bm25`) from `models/bm25_cache.pkl`
+3. Load cached **TF-IDF** (scikit-learn) from `models/tfidf_cache.pkl`
+4. Load cached **inverted index** from `models/inverted_index.pkl`
+5. Load **embedding model** + cached **FAISS** index
+
+The `/health` endpoint reports:
+
+```json
+{
+  "documents_cached": true,
+  "inverted_index_cached": true,
+  "bm25_cached": true,
+  "tfidf_cached": true,
+  "vector_index_cached": true
+}
+```
+
+Log messages on cache hit:
+
+```
+Processed corpus cache hit — loading N docs from SQLite...
+Inverted index cache hit — loaded in X.XXs
+BM25 cache hit — loaded in X.XXs
+TF-IDF cache hit — loaded in X.XXs
+Vector index cache hit
+```
+
+Set `REBUILD_LEXICAL_INDEX = True` or delete files under `models/` to force a full rebuild.
+
+---
+
 ## Retrieval Models | نماذج الاسترجاع
 
-| Model | Description |
-|-------|-------------|
-| **TF-IDF** | Vector space model with TF-IDF weighting |
-| **BM25** | Probabilistic lexical retrieval (tuned k1, b) |
-| **Embedding** | Dense retrieval via sentence-transformers + FAISS |
-| **Hybrid Serial** | BM25 candidates → dense re-ranking |
-| **Hybrid Parallel** | BM25 + dense in parallel → RRF fusion |
+| Model | Library / Method | Description |
+|-------|------------------|-------------|
+| **TF-IDF** | scikit-learn `TfidfVectorizer` | L2-normalized vectors, cosine similarity |
+| **BM25** | `rank_bm25.BM25Okapi` | Probabilistic lexical retrieval (tuned k1, b) |
+| **Embedding** | sentence-transformers + FAISS | Dense semantic retrieval |
+| **Hybrid Serial** | BM25 → dense re-rank | Top-100 BM25 candidates re-ranked by embeddings |
+| **Hybrid Parallel** | BM25 + dense → fusion | RRF (default) or **weighted fusion** via UI weights |
 
 ---
 
@@ -234,7 +325,8 @@ Architecture diagrams: [`docs/Architecture_Diagram.md`](docs/Architecture_Diagra
 | BM25 (before refinement) | 0.319 | 0.346 |
 | BM25 (after refinement) | 0.162 | 0.209 |
 
-> Query refinement is implemented and evaluated; on Quora it reduced MAP due to noisy PRF expansion — documented in `results/refinement/`.
+> Query refinement is implemented and evaluated; on Quora it reduced MAP due to noisy PRF expansion — documented in `results/refinement/`.  
+> Note: switching to `rank_bm25` / sklearn may slightly change lexical scores vs earlier manual implementations.
 
 ---
 
@@ -269,6 +361,8 @@ Use **Preview Refinement** in the UI to inspect changes without searching.
 - [x] BM25 parameter tuning
 - [x] Query refinement + before/after evaluation
 - [x] SOA + REST API + Web UI
+- [x] Document persistence (SQLite)
+- [x] Index / BM25 / TF-IDF / FAISS disk caching
 - [x] Architecture diagram (`docs/Architecture_Diagram.md`)
 - [x] README (this file)
 - [ ] Arabic technical report
@@ -281,6 +375,7 @@ Use **Preview Refinement** in the UI to inspect changes without searching.
 
 - [ir-datasets](https://ir-datasets.com/)
 - [BEIR Quora](https://github.com/beir-cellar/beir)
+- [rank-bm25](https://github.com/dorianbrown/rank_bm25)
 - Robertson, S. & Zaragoza, H. (2009). *The Probabilistic Relevance Framework: BM25 and Beyond*
 - Reimers, N. & Gurevych, I. (2019). *Sentence-BERT*
 - Cormack, G. et al. (2009). *Reciprocal Rank Fusion*

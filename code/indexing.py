@@ -48,6 +48,30 @@ class InvertedIndex:
             
         logger.info(f"Inverted index built successfully. Unique terms: {len(self.index)}")
         
+    def to_state(self):
+        """Serialize index for disk cache."""
+        return {
+            "index": {term: dict(postings) for term, postings in self.index.items()},
+            "doc_lengths": self.doc_lengths,
+            "df": dict(self.df),
+            "total_docs": self.total_docs,
+            "avg_doc_length": self.avg_doc_length,
+        }
+
+    @classmethod
+    def from_state(cls, state):
+        """Restore index from serialized state."""
+        index = cls()
+        index.index = defaultdict(dict, {
+            term: dict(postings)
+            for term, postings in state["index"].items()
+        })
+        index.doc_lengths = state["doc_lengths"]
+        index.df = defaultdict(int, state["df"])
+        index.total_docs = state["total_docs"]
+        index.avg_doc_length = state["avg_doc_length"]
+        return index
+        
     def get_term_postings(self, term):
         """الحصول على قائمة الوثائق التي تحتوي على مصطلح معين"""
         return self.index.get(term, {})

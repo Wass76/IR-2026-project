@@ -1,7 +1,7 @@
 import random
 
 import ir_datasets
-from config import MAX_DOCS
+from config import DATASET_NAME, MAX_DOCS
 from utils import setup_logger
 
 logger = setup_logger("DataLoader")
@@ -127,6 +127,86 @@ def get_documents(dataset, max_docs=MAX_DOCS):
             logger.info(f"تم استخراج {i + 1} وثيقة...")
             
     logger.info(f"اكتمل استخراج الوثائق. العدد الإجمالي: {len(docs)}")
+    return docs
+
+def load_or_build_processed_corpus(
+    document_store,
+    preprocessor,
+    dataset=None,
+    max_docs=MAX_DOCS,
+    dataset_name=None,
+):
+    """
+    Load originals + processed tokens from SQLite when cached, otherwise build,
+    persist, and return both collections.
+
+    Returns:
+        (docs, processed_docs, documents_source, processed_source)
+        sources are "sqlite" or "ir_datasets"/"computed"
+    """
+    dataset_name = dataset_name or DATASET_NAME
+
+    if document_store is not None:
+        bundle = document_store.load_corpus_bundle(
+            dataset_name, max_docs, preprocessor
+        )
+        if bundle is not None:
+            return bundle[0], bundle[1], "sqlite", "sqlite"
+
+    docs = None
+    documents_source = "ir_datasets"
+
+    if document_store is not None:
+        docs = document_store.load_corpus(dataset_name, max_docs)
+        if docs is not None:
+            documents_source = "sqlite"
+
+    if docs is None:
+        if dataset is None:
+            dataset = load_dataset(dataset_name)
+        docs = get_documents(dataset, max_docs=max_docs)
+        documents_source = "ir_datasets"
+
+    processed_docs = preprocessor.process_collection(docs)
+    processed_source = "computed"
+
+    if document_store is not None:
+        document_store.save_corpus_bundle(
+            docs,
+            processed_docs,
+            dataset_name=dataset_name,
+            max_docs=max_docs,
+            preprocessor=preprocessor,
+        )
+        if documents_source == "sqlite":
+            processed_source = "sqlite"
+
+    return docs, processed_docs, documents_source, processed_source
+
+def load_and_persist_documents(
+    dataset,
+    max_docs=MAX_DOCS,
+    document_store=None,
+    dataset_name=None,
+):
+    """
+    Load documents for indexing. Uses SQLite when the same corpus is already stored,
+    otherwise reads from ir_datasets and persists originals.
+    """
+    dataset_name = dataset_name or DATASET_NAME
+
+    if document_store is not None:
+        cached_docs = document_store.load_corpus(dataset_name, max_docs)
+        if cached_docs is not None:
+            return cached_docs
+
+    docs = get_documents(dataset, max_docs=max_docs)
+    if document_store is not None:
+        document_store.save_corpus(
+            docs,
+            dataset_name=dataset_name,
+            max_docs=max_docs,
+        )
     return docs
 
 def get_queries(dataset):

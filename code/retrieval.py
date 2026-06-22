@@ -1,4 +1,3 @@
-import math
 from collections import defaultdict
 
 from config import (
@@ -10,6 +9,7 @@ from config import (
     RRF_K,
     HYBRID_FUSION_METHOD,
     HYBRID_BM25_WEIGHT,
+    HYBRID_DENSE_WEIGHT,
 )
 from utils import setup_logger
 
@@ -17,48 +17,44 @@ logger = setup_logger("Retrieval")
 
 
 class SearchEngine:
-    def __init__(self, index, bm25_k1=None, bm25_b=None):
+    def __init__(
+        self,
+        index,
+        bm25_k1=None,
+        bm25_b=None,
+        bm25_cache=None,
+        tfidf_cache=None,
+    ):
         self.index = index
         self.bm25_k1 = BM25_K1 if bm25_k1 is None else bm25_k1
         self.bm25_b = BM25_B if bm25_b is None else bm25_b
+        self.bm25_cache = bm25_cache
+        self.tfidf_cache = tfidf_cache
 
     def score_tfidf(self, query_tokens):
-        scores = defaultdict(float)
-        query_tf = defaultdict(int)
-        for token in query_tokens:
-            query_tf[token] += 1
-        for term, q_tf in query_tf.items():
-            postings = self.index.get_term_postings(term)
-            if not postings:
-                continue
-            idf = self.index.get_idf(term)
-            for doc_id, doc_tf in postings.items():
-                scores[doc_id] += (1 + math.log10(doc_tf)) * idf * (1 + math.log10(q_tf)) * idf
-        return scores
+        if self.tfidf_cache is None:
+            raise RuntimeError("TF-IDF cache not loaded")
+        return self.tfidf_cache.score(query_tokens)
 
     def score_bm25(self, query_tokens):
-        scores = defaultdict(float)
-        k1, b = self.bm25_k1, self.bm25_b
-        avg_dl, N = self.index.avg_doc_length, self.index.total_docs
-        for term in query_tokens:
-            postings = self.index.get_term_postings(term)
-            if not postings:
-                continue
-            df = self.index.get_df(term)
-            idf = math.log((N - df + 0.5) / (df + 0.5) + 1.0)
-            for doc_id, tf in postings.items():
-                dl = self.index.doc_lengths[doc_id]
-                scores[doc_id] += idf * (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * (dl / avg_dl)))
-        return scores
+        if self.bm25_cache is None:
+            raise RuntimeError("BM25 cache not loaded")
+        return self.bm25_cache.score(query_tokens)
 
     def retrieve(self, query_tokens, model="bm25", top_k=TOP_K):
         if not query_tokens:
             return []
-        scores = self.score_tfidf(query_tokens) if model.lower() == "tfidf" else self.score_bm25(query_tokens)
+        scores = (
+            self.score_tfidf(query_tokens)
+            if model.lower() == "tfidf"
+            else self.score_bm25(query_tokens)
+        )
         return sorted(scores.items(), key=lambda x: x[1], reverse=True)[:top_k]
 
     def retrieve_batch(self, processed_queries, model="bm25", top_k=TOP_K):
-        logger.info(f"Retrieving results for {len(processed_queries)} queries using {model}...")
+        logger.info(
+            f"Retrieving results for {len(processed_queries)} queries using {model}..."
+        )
         results = {}
         for i, (query_id, tokens) in enumerate(processed_queries.items()):
             results[query_id] = self.retrieve(tokens, model, top_k)
@@ -163,25 +159,50 @@ class HybridSearchEngine:
             scores[doc_id] += 1.0 / (k + rank)
         return sorted(scores.items(), key=lambda x: x[1], reverse=True)
 
-    def weighted_fusion(self, bm25_results, dense_results, bm25_weight=HYBRID_BM25_WEIGHT):
+    def weighted_fusion(
+        self,
+        bm25_results,
+        dense_results,
+        bm25_weight=None,
+        dense_weight=None,
+    ):
+        bm25_w = HYBRID_BM25_WEIGHT if bm25_weight is None else bm25_weight
+        dense_w = HYBRID_DENSE_WEIGHT if dense_weight is None else dense_weight
+        total = bm25_w + dense_w
+        if total > 0:
+            bm25_w /= total
+            dense_w /= total
         bm25_norm = self._normalize_scores(bm25_results)
         dense_norm = self._normalize_scores(dense_results)
         all_docs = set(bm25_norm) | set(dense_norm)
-        dense_weight = 1.0 - bm25_weight
         fused = [
             (
                 doc_id,
-                bm25_weight * bm25_norm.get(doc_id, 0.0)
-                + dense_weight * dense_norm.get(doc_id, 0.0),
+                bm25_w * bm25_norm.get(doc_id, 0.0)
+                + dense_w * dense_norm.get(doc_id, 0.0),
             )
             for doc_id in all_docs
         ]
         return sorted(fused, key=lambda x: x[1], reverse=True)
 
-    def fuse_results(self, bm25_results, dense_results, fusion_method=None):
+    def fuse_results(
+        self,
+        bm25_results,
+        dense_results,
+        fusion_method=None,
+        bm25_weight=None,
+        dense_weight=None,
+    ):
         method = (fusion_method or HYBRID_FUSION_METHOD).lower()
+        if bm25_weight is not None or dense_weight is not None:
+            method = "weighted"
         if method == "weighted":
-            return self.weighted_fusion(bm25_results, dense_results)
+            return self.weighted_fusion(
+                bm25_results,
+                dense_results,
+                bm25_weight=bm25_weight,
+                dense_weight=dense_weight,
+            )
         return self.rrf_fusion(bm25_results, dense_results)
 
     def retrieve_serial(self, query_tokens, query_text, top_k=TOP_K):
@@ -194,7 +215,15 @@ class HybridSearchEngine:
         candidate_ids = [doc_id for doc_id, _ in candidates]
         return self.dense_engine.rerank(query_text, candidate_ids, top_k=top_k)
 
-    def retrieve_parallel(self, query_tokens, query_text, top_k=TOP_K, fusion_method=None):
+    def retrieve_parallel(
+        self,
+        query_tokens,
+        query_text,
+        top_k=TOP_K,
+        fusion_method=None,
+        bm25_weight=None,
+        dense_weight=None,
+    ):
         """Run BM25 and dense in parallel, then fuse ranked lists."""
         bm25_results = self.bm25_engine.retrieve(
             query_tokens,
@@ -205,7 +234,13 @@ class HybridSearchEngine:
             query_text,
             top_k=HYBRID_PARALLEL_DEPTH,
         )
-        return self.fuse_results(bm25_results, dense_results, fusion_method)[:top_k]
+        return self.fuse_results(
+            bm25_results,
+            dense_results,
+            fusion_method,
+            bm25_weight=bm25_weight,
+            dense_weight=dense_weight,
+        )[:top_k]
 
     def retrieve_batch(self, processed_queries, raw_queries, top_k=TOP_K, mode="parallel"):
         if mode == "serial":

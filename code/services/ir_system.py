@@ -3,6 +3,7 @@ Service-oriented IR system: loads indexes once and exposes search/refinement ope
 """
 
 import time
+import math
 
 from config import (
     DATASET_NAME,
@@ -13,15 +14,23 @@ from config import (
     VECTOR_DOC_IDS_PATH,
     EMBEDDING_METADATA_PATH,
     BM25_PARAMS_PATH,
+    HYBRID_SERIAL_CANDIDATES,
+    HYBRID_PARALLEL_DEPTH,
+    RRF_K,
+    HYBRID_FUSION_METHOD,
+    HYBRID_BM25_WEIGHT,
+    HYBRID_DENSE_WEIGHT,
+    EMBEDDING_MODEL,
 )
-from data_loader import load_dataset, get_documents
+from data_loader import load_or_build_processed_corpus
 from preprocessing import TextPreprocessor
-from indexing import InvertedIndex
+from index_cache import load_or_build_lexical_index
 from retrieval import SearchEngine, DenseSearchEngine, HybridSearchEngine
 from embeddings import EmbeddingModel
 from vector_index import VectorIndex
 from bm25_tuning import load_tuned_params
 from query_refinement import QueryRefiner
+from document_store import DocumentStore
 from utils import setup_logger, load_json
 
 logger = setup_logger("IRSystem")
@@ -35,6 +44,7 @@ class IRSystem:
         self.max_docs = MAX_DOCS
         self.docs = {}
         self.processed_docs = {}
+        self.document_store = DocumentStore()
         self.preprocessor = None
         self.index = None
         self.search_engine = None
@@ -48,7 +58,45 @@ class IRSystem:
         self.bm25_k1 = None
         self.bm25_b = None
         self.vector_cache_hit = False
+        self.inverted_index_cached = False
+        self.bm25_cached = False
+        self.tfidf_cached = False
         self.load_seconds = 0.0
+        self.documents_source = None
+        self.processed_source = None
+
+    @staticmethod
+    def get_hybrid_settings():
+        return {
+            "serial": {
+                "mode": "serial",
+                "description": "BM25 candidate generation → dense re-ranking",
+                "bm25_candidates": HYBRID_SERIAL_CANDIDATES,
+            },
+            "parallel": {
+                "mode": "parallel",
+                "description": "BM25 + dense retrieval → score fusion",
+                "bm25_depth": HYBRID_PARALLEL_DEPTH,
+                "dense_depth": HYBRID_PARALLEL_DEPTH,
+                "fusion_method": HYBRID_FUSION_METHOD,
+                "rrf_k": RRF_K,
+                "bm25_weight": HYBRID_BM25_WEIGHT,
+                "dense_weight": HYBRID_DENSE_WEIGHT,
+            },
+            "embedding_model": EMBEDDING_MODEL,
+        }
+
+    @staticmethod
+    def model_label(model):
+        labels = {
+            "bm25": "BM25",
+            "tfidf": "TF-IDF",
+            "embedding": "Dense Embedding",
+            "hybrid_serial": "Hybrid Serial",
+            "hybrid_parallel": "Hybrid Parallel",
+            "hybrid": "Hybrid Parallel",
+        }
+        return labels.get(model.lower(), model)
 
     def _build_or_load_vector_index(self, docs, max_docs):
         doc_ids = list(docs.keys())
@@ -64,6 +112,7 @@ class IRSystem:
         ):
             vector_index = VectorIndex()
             vector_index.load(VECTOR_INDEX_PATH, VECTOR_DOC_IDS_PATH)
+            logger.info("Vector index cache hit")
             return vector_index, embedder, True
 
         texts = [docs[did] for did in doc_ids]
@@ -83,19 +132,47 @@ class IRSystem:
         start = time.time()
         logger.info(f"Loading IR system (dataset={DATASET_NAME}, max_docs={max_docs})...")
 
-        dataset = load_dataset(DATASET_NAME)
-        self.docs = get_documents(dataset, max_docs=max_docs)
-        self.max_docs = max_docs
-
         self.preprocessor = TextPreprocessor(use_stemming=True)
-        self.processed_docs = self.preprocessor.process_collection(self.docs)
-
-        self.index = InvertedIndex()
-        self.index.build(self.processed_docs)
+        (
+            self.docs,
+            self.processed_docs,
+            self.documents_source,
+            self.processed_source,
+        ) = load_or_build_processed_corpus(
+            self.document_store,
+            self.preprocessor,
+            max_docs=max_docs,
+            dataset_name=DATASET_NAME,
+        )
+        self.max_docs = max_docs
 
         k1, b, _ = load_tuned_params()
         self.bm25_k1, self.bm25_b = k1, b
-        self.search_engine = SearchEngine(self.index, bm25_k1=k1, bm25_b=b)
+
+        (
+            self.index,
+            bm25_cache,
+            tfidf_cache,
+            lexical_flags,
+        ) = load_or_build_lexical_index(
+            self.processed_docs,
+            dataset_name=DATASET_NAME,
+            max_docs=max_docs,
+            preprocessor=self.preprocessor,
+            bm25_k1=k1,
+            bm25_b=b,
+        )
+        self.inverted_index_cached = lexical_flags["inverted_index_cached"]
+        self.bm25_cached = lexical_flags["bm25_cached"]
+        self.tfidf_cached = lexical_flags["tfidf_cached"]
+
+        self.search_engine = SearchEngine(
+            self.index,
+            bm25_k1=k1,
+            bm25_b=b,
+            bm25_cache=bm25_cache,
+            tfidf_cache=tfidf_cache,
+        )
 
         vector_index, embedder, cache_hit = self._build_or_load_vector_index(
             self.docs, max_docs
@@ -111,18 +188,33 @@ class IRSystem:
         return self.status()
 
     def status(self):
+        documents_cached = (
+            self.processed_source == "sqlite" and self.documents_source == "sqlite"
+        )
         return {
             "loaded": self.loaded,
             "dataset": DATASET_NAME,
             "max_docs": self.max_docs,
             "doc_count": len(self.docs),
             "unique_terms": len(self.index.index) if self.index else 0,
+            "documents_cached": documents_cached,
+            "inverted_index_cached": self.inverted_index_cached,
+            "bm25_cached": self.bm25_cached,
+            "tfidf_cached": self.tfidf_cached,
+            "vector_index_cached": self.vector_cache_hit,
             "vector_index_loaded": self.dense_engine is not None,
             "vector_cache_hit": self.vector_cache_hit,
             "bm25_k1": self.bm25_k1,
             "bm25_b": self.bm25_b,
             "bm25_params_tuned": BM25_PARAMS_PATH.exists(),
             "load_seconds": self.load_seconds,
+            "document_store": {
+                "path": self.document_store.db_path,
+                "doc_count": self.document_store.document_count(),
+                "corpus_meta": self.document_store.get_corpus_meta(),
+                "documents_source": self.documents_source,
+                "processed_source": self.processed_source,
+            },
             "session": {
                 "search_count": self.search_count,
                 "history_size": len(self.query_history),
@@ -147,7 +239,15 @@ class IRSystem:
         )
         return result
 
-    def search(self, query, model="bm25", top_k=TOP_K, use_refinement=False):
+    def search(
+        self,
+        query,
+        model="bm25",
+        top_k=TOP_K,
+        use_refinement=False,
+        bm25_weight=None,
+        dense_weight=None,
+    ):
         self._ensure_loaded()
         top_k = top_k or TOP_K
         model = model.lower()
@@ -168,7 +268,11 @@ class IRSystem:
             )
         elif model in ("hybrid_parallel", "hybrid"):
             ranked = self.hybrid_engine.retrieve_parallel(
-                query_tokens, query, top_k=top_k
+                query_tokens,
+                query,
+                top_k=top_k,
+                bm25_weight=bm25_weight,
+                dense_weight=dense_weight,
             )
         else:
             raise ValueError(
@@ -182,25 +286,61 @@ class IRSystem:
         self.last_model = model
         results = [
             {
+                "rank": i + 1,
                 "doc_id": doc_id,
-                "score": round(float(score), 6),
+                "score": round(float(score), 6) if math.isfinite(float(score)) else 0.0,
                 "snippet": self._snippet(doc_id),
+                "full_content": self._original_content(doc_id),
             }
-            for doc_id, score in ranked
+            for i, (doc_id, score) in enumerate(ranked)
         ]
+
+        hybrid_settings = None
+        if model in ("hybrid_serial", "hybrid_parallel", "hybrid"):
+            all_settings = self.get_hybrid_settings()
+            if model == "hybrid_serial":
+                hybrid_settings = all_settings["serial"]
+            else:
+                hybrid_settings = dict(all_settings["parallel"])
+                if bm25_weight is not None:
+                    hybrid_settings["bm25_weight"] = bm25_weight
+                if dense_weight is not None:
+                    hybrid_settings["dense_weight"] = dense_weight
+                if bm25_weight is not None or dense_weight is not None:
+                    hybrid_settings["fusion_method"] = "weighted"
 
         return {
             "query": query,
             "model": model,
+            "model_label": self.model_label(model),
             "top_k": top_k,
             "use_refinement": use_refinement,
             "refinement": refinement,
+            "hybrid_settings": hybrid_settings,
             "result_count": len(results),
             "results": results,
         }
 
+    def get_document(self, doc_id):
+        """Return the persisted original document for a doc_id."""
+        record = self.document_store.get_document(doc_id)
+        if record is not None:
+            return record
+        content = self.docs.get(doc_id)
+        if content is None:
+            return None
+        return {
+            "doc_id": doc_id,
+            "original_content": content,
+            "metadata": None,
+        }
+
+    def _original_content(self, doc_id):
+        record = self.get_document(doc_id)
+        return record["original_content"] if record else ""
+
     def _snippet(self, doc_id, max_len=200):
-        text = self.docs.get(doc_id, "")
+        text = self._original_content(doc_id)
         if len(text) <= max_len:
             return text
         return text[:max_len].rstrip() + "..."
