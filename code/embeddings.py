@@ -32,6 +32,25 @@ class EmbeddingModel:
         text = re.sub(r"\s+", " ", text)
         return text
 
+    def encode_texts(self, texts, batch_size=None, show_progress=False, log=True):
+        """Encode a list of texts; optional logging/progress for bulk runs."""
+        batch_size = batch_size or EMBEDDING_BATCH_SIZE
+        prepared = [self.prepare_text(t) for t in texts]
+        if not prepared:
+            return np.zeros((0, EMBEDDING_DIM), dtype=np.float32)
+
+        if log:
+            logger.info(f"Encoding {len(prepared)} texts (batch_size={batch_size})...")
+
+        embeddings = self.model.encode(
+            prepared,
+            batch_size=batch_size,
+            normalize_embeddings=NORMALIZE_EMBEDDINGS,
+            show_progress_bar=show_progress,
+            convert_to_numpy=True,
+        )
+        return np.asarray(embeddings, dtype=np.float32)
+
     def encode_documents(self, texts, batch_size=None):
         """
         Batch-encode a list of document texts.
@@ -43,18 +62,25 @@ class EmbeddingModel:
         Returns:
             float32 numpy array of shape (N, EMBEDDING_DIM)
         """
-        batch_size = batch_size or EMBEDDING_BATCH_SIZE
-        prepared = [self.prepare_text(t) for t in texts]
-        logger.info(f"Encoding {len(prepared)} documents (batch_size={batch_size})...")
-
-        embeddings = self.model.encode(
-            prepared,
+        return self.encode_texts(
+            texts,
             batch_size=batch_size,
-            normalize_embeddings=NORMALIZE_EMBEDDINGS,
-            show_progress_bar=True,
-            convert_to_numpy=True,
+            show_progress=True,
+            log=True,
         )
-        return np.asarray(embeddings, dtype=np.float32)
+
+    def encode_single(self, text, batch_size=None):
+        """Encode one text without per-call logging (for rerank / single retrieve)."""
+        prepared = self.prepare_text(text)
+        if not prepared:
+            return None
+        vec = self.encode_texts(
+            [prepared],
+            batch_size=batch_size or 1,
+            show_progress=False,
+            log=False,
+        )
+        return vec[0]
 
     def encode_queries(self, queries_dict, batch_size=None):
         """
@@ -69,16 +95,12 @@ class EmbeddingModel:
 
         query_ids = list(queries_dict.keys())
         texts = [self.prepare_text(queries_dict[qid]) for qid in query_ids]
-        logger.info(f"Encoding {len(texts)} queries (batch_size={batch_size})...")
-
-        embeddings = self.model.encode(
+        embeddings = self.encode_texts(
             texts,
             batch_size=batch_size,
-            normalize_embeddings=NORMALIZE_EMBEDDINGS,
-            show_progress_bar=False,
-            convert_to_numpy=True,
+            show_progress=False,
+            log=True,
         )
-        embeddings = np.asarray(embeddings, dtype=np.float32)
 
         return {qid: embeddings[i] for i, qid in enumerate(query_ids)}
 

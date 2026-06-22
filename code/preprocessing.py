@@ -10,11 +10,13 @@ logger = setup_logger("Preprocessing")
 # تحميل أدوات NLTK المطلوبة
 try:
     nltk.data.find('tokenizers/punkt')
+    nltk.data.find('tokenizers/punkt_tab')
     nltk.data.find('corpora/stopwords')
     nltk.data.find('corpora/wordnet')
 except LookupError:
     logger.info("Downloading required NLTK resources...")
     nltk.download('punkt')
+    nltk.download('punkt_tab')
     nltk.download('stopwords')
     nltk.download('wordnet')
 

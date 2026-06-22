@@ -34,6 +34,34 @@ class VectorIndex:
         self.index.add(embeddings)
         logger.info(f"Vector index built: {self.index.ntotal} vectors, dim={dim}")
 
+    def _doc_id_to_index(self):
+        return {doc_id: i for i, doc_id in enumerate(self.doc_ids)}
+
+    def score_candidates(self, query_vector, candidate_doc_ids):
+        """
+        Score a restricted set of documents (for serial hybrid re-ranking).
+
+        Returns:
+            list of (doc_id, score) sorted by descending similarity
+        """
+        if self.index is None or not candidate_doc_ids:
+            return []
+
+        q = np.asarray(query_vector, dtype=np.float32).reshape(1, -1)
+        id_to_idx = self._doc_id_to_index()
+        scored = []
+
+        for doc_id in candidate_doc_ids:
+            idx = id_to_idx.get(doc_id)
+            if idx is None:
+                continue
+            doc_vector = self.index.reconstruct(int(idx)).reshape(1, -1)
+            score = float(np.dot(q, doc_vector.T)[0, 0])
+            scored.append((doc_id, score))
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored
+
     def search(self, query_vector, top_k=10):
         """
         Search for nearest neighbors.
