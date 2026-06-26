@@ -90,7 +90,7 @@ class TfidfCache:
             preprocessor=_identity_preprocess,
             token_pattern=None,
             lowercase=False,
-            sublinear_tf=True,
+            sublinear_tf=True, #TF = 1 + log(TF)
             norm="l2",
         )
         matrix = vectorizer.fit_transform(corpus)
