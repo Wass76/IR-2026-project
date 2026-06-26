@@ -341,12 +341,39 @@
     denseWeightInput.addEventListener("input", syncDenseWeight);
 
     document.getElementById("loadBtn").onclick = async () => {
-      statusEl.textContent = "Loading index...";
+      const loadBtn = document.getElementById("loadBtn");
+      loadBtn.disabled = true;
+      statusEl.textContent = "Loading index... (first run may take 1–5 minutes)";
+      searchSummaryEl.innerHTML =
+        `<div class="summary">⏳ <strong>Loading index...</strong> Please wait. Do not close this tab.</div>`;
+      resultsEl.innerHTML = "";
+      const started = Date.now();
       try {
-        await api("/services/index/load", { method: "POST" });
+        const data = await api("/services/index/load", { method: "POST" });
         await refreshStatus();
+        const elapsed = ((Date.now() - started) / 1000).toFixed(1);
+        searchSummaryEl.innerHTML = `
+          <div class="summary">
+            ✅ <strong>Index loaded successfully</strong><br>
+            Docs: ${data.doc_count} &nbsp;|&nbsp; Loaded: ${data.loaded}<br>
+            Time: ${data.load_seconds ?? elapsed}s &nbsp;|&nbsp;
+            BM25 cache: ${data.bm25_cached} &nbsp;|&nbsp; Vector cache: ${data.vector_index_cached}<br>
+            You can search now.
+          </div>`;
       } catch (err) {
-        statusEl.innerHTML = `<span class="error">${escapeHtml(err.message)}</span>`;
+        const msg = err.message || String(err);
+        statusEl.innerHTML = `<span class="error">${escapeHtml(msg)}</span>`;
+        searchSummaryEl.innerHTML = `
+          <div class="summary error">
+            ❌ <strong>Load Index failed</strong><br>
+            ${escapeHtml(msg)}<br><br>
+            <strong>Checks:</strong><br>
+            1. Is the API running? <code>python main.py --mode api</code><br>
+            2. Open <a href="/health">/health</a> in the browser<br>
+            3. If it timed out, use Search — it loads the index the same way
+          </div>`;
+      } finally {
+        loadBtn.disabled = false;
       }
     };
 
