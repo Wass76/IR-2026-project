@@ -27,7 +27,7 @@ DATASET_NAME = 'beir/quora/test'
 
 # إعدادات معالجة البيانات
 BATCH_SIZE = 1000       # عدد الوثائق في كل دفعة (لتوفير الذاكرة)
-MAX_DOCS = 200000      # Use None for full corpus; full baseline saved in results/baseline/run_full/
+MAX_DOCS = None      # Use None for full corpus; full baseline saved in results/baseline/run_full/
 
 # إعدادات الفهرسة والاسترجاع
 TOP_K = 10              # عدد النتائج المسترجعة لكل استعلام

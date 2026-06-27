@@ -342,35 +342,6 @@ Use **Preview Refinement** in the UI to inspect changes without searching.
 
 ---
 
-## Team | فريق العمل
-
-| Member | Role |
-|--------|------|
-| _Name_ | _Responsibility_ |
-| _Name_ | _Responsibility_ |
-
-> Update this table with your team division document.
-
----
-
-## Deliverables Checklist | قائمة التسليمات
-
-- [x] Working IR pipeline (Python)
-- [x] Single dataset with qrels (Quora)
-- [x] TF-IDF, BM25, Embeddings, Hybrid
-- [x] BM25 parameter tuning
-- [x] Query refinement + before/after evaluation
-- [x] SOA + REST API + Web UI
-- [x] Document persistence (SQLite)
-- [x] Index / BM25 / TF-IDF / FAISS disk caching
-- [x] Architecture diagram (`docs/Architecture_Diagram.md`)
-- [x] README (this file)
-- [ ] Arabic technical report
-- [ ] Demo videos
-- [ ] Team work division document
-
----
-
 ## References | مراجع
 
 - [ir-datasets](https://ir-datasets.com/)
