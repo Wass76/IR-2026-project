@@ -1,291 +1,486 @@
-# IR Project 2026 — System Architecture Diagram
+# IR Project 2026 — System Diagrams
 
-**Project:** Information Retrieval System  
-**Architecture style:** Service-Oriented Architecture (SOA)  
-**Dataset:** `beir/quora/test` (ir-datasets)  
-**Stack:** Python, FastAPI, FAISS, sentence-transformers, NLTK
+**Dataset:** `beir/quora/test` (~523K docs, 10K test queries)  
+**Stack:** Python, FastAPI, SQLite, FAISS, rank-bm25, scikit-learn, sentence-transformers
+
+> Render: open this file in VS Code Markdown preview, or paste Mermaid blocks into [mermaid.live](https://mermaid.live) and export PNG/SVG.
 
 ---
 
-## 1. High-Level SOA Architecture
+## 1. High-Level System Architecture
 
 ```mermaid
 flowchart TB
-    subgraph Client["Presentation Layer"]
+    subgraph Client["Client Layer"]
         UI["Web UI\nfrontend/index.html"]
-        CLI["CLI Pipeline\ncode/main.py"]
-        Swagger["API Docs\n/docs"]
+        CLI["CLI\nmain.py"]
     end
 
     subgraph Gateway["API Gateway"]
-        API["FastAPI Gateway\ncode/api/app.py"]
+        API["FastAPI\ncode/api/app.py"]
     end
 
-    subgraph Services["Service Layer (SOA)"]
-        IR["IRSystem Orchestrator\ncode/services/ir_system.py"]
-        PRE["Preprocessing Service\npreprocessing.py"]
-        IDX["Indexing Service\nindexing.py + vector_index.py"]
-        RET["Retrieval Service\nretrieval.py"]
-        REF["Query Refinement Service\nquery_refinement.py"]
-        EVAL["Evaluation Service\nevaluation.py"]
-        TUNE["BM25 Tuning Service\nbm25_tuning.py"]
+    subgraph Orchestrator["Service Orchestrator"]
+        IR["IRSystem\ncode/services/ir_system.py"]
     end
 
-    subgraph Models["Representation & Ranking Models"]
-        TFIDF["VSM / TF-IDF"]
-        BM25["BM25\n(tuned k1, b)"]
-        EMB["Dense Embeddings\nsentence-transformers"]
-        HYB_S["Hybrid Serial\nBM25 → Dense re-rank"]
-        HYB_P["Hybrid Parallel\nRRF fusion"]
+    subgraph Services["Core Services"]
+        DL["Data Loader\ndata_loader.py"]
+        DS["Document Store\ndocument_store.py"]
+        PRE["Preprocessing\npreprocessing.py"]
+        IC["Index Cache\nindex_cache.py"]
+        RET["Retrieval\nretrieval.py"]
+        REF["Query Refinement\nquery_refinement.py"]
+        EV["Evaluation\nevaluation.py"]
     end
 
-    subgraph Storage["Persistence Layer"]
-        DATA[("ir-datasets\nQuora corpus")]
-        INV[("Inverted Index\nin-memory")]
-        FAISS[("Vector Index\nmodels/vector_index.faiss")]
-        RES[("Results & Metrics\nresults/")]
-        CFG[("Tuned Params\nmodels/bm25_params.json")]
+    subgraph Models["Retrieval Models"]
+        BM25["BM25\nrank_bm25"]
+        TFIDF["TF-IDF\nsklearn"]
+        DEN["Dense\nFAISS + embeddings"]
+        HYS["Hybrid Serial"]
+        HYP["Hybrid Parallel\nRRF / weighted"]
+    end
+
+    subgraph Persistence["Persistence"]
+        IRDS[("ir_datasets\nQuora download")]
+        SQLITE[("SQLite\ndata/documents.db")]
+        PICKLE[("Lexical cache\nmodels/*.pkl")]
+        FAISS[("Vector index\nmodels/*.faiss")]
+        RES[("Results\nresults/")]
     end
 
     UI --> API
-    Swagger --> API
-    CLI --> Services
-
+    CLI --> DL
+    CLI --> RET
     API --> IR
+
+    IR --> DL
+    IR --> DS
     IR --> PRE
-    IR --> IDX
+    IR --> IC
     IR --> RET
     IR --> REF
-    IR --> EVAL
-    IR --> TUNE
 
-    RET --> TFIDF
+    DL --> IRDS
+    DL --> DS
+    DS --> SQLITE
+    IC --> PICKLE
     RET --> BM25
-    RET --> EMB
-    RET --> HYB_S
-    RET --> HYB_P
-
-    PRE --> INV
-    IDX --> INV
-    IDX --> FAISS
-    TUNE --> CFG
-    EVAL --> RES
-
-    DATA --> IR
-    INV --> RET
-    FAISS --> EMB
-    CFG --> BM25
+    RET --> TFIDF
+    RET --> DEN
+    RET --> HYS
+    RET --> HYP
+    DEN --> FAISS
+    EV --> RES
 ```
 
 ---
 
-## 2. Service Endpoints (REST API)
+## 2. SQLite Document Storage
+
+```mermaid
+erDiagram
+    documents {
+        TEXT doc_id PK
+        TEXT original_content
+        TEXT processed_tokens
+        TEXT metadata
+    }
+
+    corpus_meta {
+        TEXT key PK
+        TEXT value
+    }
+
+    documents ||--o{ corpus_meta : "described by"
+```
 
 ```mermaid
 flowchart LR
-    subgraph Gateway["FastAPI Gateway :8000"]
-        E1["POST /services/index/load"]
-        E2["GET  /services/index/status"]
-        E3["POST /services/preprocess"]
-        E4["POST /services/refine"]
-        E5["POST /services/search"]
-        E6["GET  /services/evaluation/summary"]
-        E7["GET  /services/bm25/params"]
+    subgraph documents_table["Table: documents"]
+        D1["doc_id: 188"]
+        D2["original_content: What causes nightmares..."]
+        D3["processed_tokens: caus, nightmar, seem, real"]
     end
 
-    E1 --> IDX["Indexing Service"]
-    E2 --> IDX
-    E3 --> PRE["Preprocessing Service"]
-    E4 --> REF["Query Refinement Service"]
-    E5 --> RET["Retrieval Service"]
-    E6 --> EVAL["Evaluation Service"]
-    E7 --> TUNE["BM25 Tuning Service"]
+    subgraph meta_table["Table: corpus_meta"]
+        M1["dataset → beir/quora/test"]
+        M2["max_docs → 200000 or full"]
+        M3["doc_count → 200000"]
+        M4["processed_cached → true"]
+        M5["preprocessing_stemming → true"]
+    end
+
+    subgraph usage["Used for"]
+        U1["Skip ir_datasets reload"]
+        U2["Skip re-preprocessing"]
+        U3["full_content in search UI"]
+        U4["PRF token lookup"]
+    end
+
+    documents_table --> usage
+    meta_table --> usage
 ```
 
-| Service | REST endpoint | Module |
-|---------|---------------|--------|
-| API Gateway | `/`, `/health`, `/docs` | `code/api/app.py` |
-| Indexing | `/services/index/load`, `/status` | `indexing.py`, `vector_index.py` |
-| Preprocessing | `/services/preprocess` | `preprocessing.py` |
-| Query Refinement | `/services/refine` | `query_refinement.py` |
-| Retrieval | `/services/search` | `retrieval.py` |
-| Evaluation | `/services/evaluation/summary` | `evaluation.py` |
-| BM25 Tuning | `/services/bm25/params` | `bm25_tuning.py` |
+**File:** `data/documents.db`  
+**Not stored in DB:** BM25, TF-IDF, inverted index, FAISS (those live in `models/`)
 
 ---
 
-## 3. Search Request Flow (Sequence)
+## 3. Full Storage & Cache Layers
+
+```mermaid
+flowchart TB
+    subgraph Source["Source Data"]
+        ZIP["BEIR Quora zip\n~/.ir_datasets/"]
+        CORPUS["corpus.jsonl\n523K questions"]
+        QREL["test.qrels\n15,675 judgments"]
+    end
+
+    subgraph Layer1["Layer 1 — Document Cache"]
+        DB[("documents.db\noriginal + tokens")]
+    end
+
+    subgraph Layer2["Layer 2 — Lexical Cache"]
+        INV["inverted_index.pkl"]
+        B25["bm25_cache.pkl"]
+        TF["tfidf_cache.pkl"]
+        META["lexical_index_metadata.json"]
+    end
+
+    subgraph Layer3["Layer 3 — Dense Cache"]
+        FAISS["vector_index.faiss"]
+        IDS["vector_doc_ids.json"]
+        EMBM["embedding_metadata.json"]
+    end
+
+    subgraph Layer4["Layer 4 — Results"]
+        BASE["results/baseline/"]
+        DENSE["results/dense/"]
+        REFR["results/refinement/"]
+        TUNE["results/bm25_tuning/"]
+        CHARTS["results/charts/"]
+    end
+
+    ZIP --> CORPUS
+    CORPUS --> DB
+    DB --> INV
+    DB --> B25
+    DB --> TF
+    DB --> FAISS
+
+    INV --> META
+    FAISS --> IDS
+    FAISS --> EMBM
+
+    B25 --> DENSE
+    TF --> DENSE
+    FAISS --> DENSE
+    QREL --> BASE
+    QREL --> DENSE
+    QREL --> REFR
+    QREL --> TUNE
+    DENSE --> CHARTS
+```
+
+---
+
+## 4. Load Index Flow (API / UI)
 
 ```mermaid
 sequenceDiagram
     actor User
     participant UI as Web UI
-    participant API as API Gateway
-    participant IR as IRSystem
-    participant REF as Query Refinement
-    participant PRE as Preprocessing
-    participant RET as Retrieval
-    participant IDX as Indexes
+    participant API as POST /services/index/load
+    participant IR as IRSystem.load()
+    participant DL as data_loader
+    participant DB as documents.db
+    participant IC as index_cache
+    participant FAISS as vector_index
 
-    User->>UI: Enter query + select model
-    UI->>API: POST /services/search
-    API->>IR: search(query, model, use_refinement)
+    User->>UI: Click Load Index
+    UI->>API: POST /services/index/load
+    API->>IR: load(max_docs)
 
-    alt use_refinement = true
-        IR->>REF: refine(query)
-        REF->>RET: initial BM25 (PRF)
-        REF-->>IR: expanded query tokens
+    IR->>DL: load_or_build_processed_corpus()
+    alt SQLite cache valid
+        DL->>DB: load_corpus_bundle()
+        DB-->>DL: originals + tokens
+    else Cache miss
+        DL->>DL: ir_datasets + preprocess
+        DL->>DB: save_corpus_bundle()
     end
 
-    IR->>PRE: tokenize / stem query
-    PRE-->>IR: query tokens
-
-    alt model = bm25 / tfidf
-        IR->>RET: lexical retrieve
-        RET->>IDX: inverted index lookup
-    else model = embedding
-        IR->>RET: dense retrieve
-        RET->>IDX: FAISS vector search
-    else model = hybrid
-        IR->>RET: serial or parallel hybrid
-        RET->>IDX: inverted + vector index
+    IR->>IC: load_or_build_lexical_index()
+    alt Pickle cache valid
+        IC-->>IR: inverted + BM25 + TF-IDF
+    else Cache miss
+        IC->>IC: build + save pickles
     end
 
-    IDX-->>RET: ranked doc IDs + scores
-    RET-->>IR: top-K results
-    IR-->>API: results + snippets
-    API-->>UI: JSON response
-    UI-->>User: display ranked results
+    IR->>FAISS: build or load FAISS
+    IR->>IR: create SearchEngine, Dense, Hybrid, Refiner
+    IR-->>API: status JSON
+    API-->>UI: loaded=true, doc_count, cache flags
+    UI-->>User: Index ready — search now
 ```
+
+**Note:** Search also calls `load()` automatically if not loaded yet (`_ensure_loaded()`).
 
 ---
 
-## 4. Offline Evaluation Pipeline (CLI)
+## 5. Search Request Flow
 
 ```mermaid
-flowchart TD
-    START(["python main.py --mode ..."]) --> MODE{Mode?}
+sequenceDiagram
+    actor User
+    participant UI as Web UI
+    participant API as POST /services/search
+    participant IR as IRSystem
+    participant PRE as Preprocessing
+    participant REF as QueryRefiner
+    participant RET as Retrieval
+    participant DB as documents.db
 
-    MODE -->|baseline| B1["Load dataset"]
-    MODE -->|dense / hybrid| D1["Load + index corpus"]
-    MODE -->|tune-bm25| T1["Grid search k1, b"]
-    MODE -->|refinement| R1["Before/after BM25 eval"]
-    MODE -->|api| A1["Start FastAPI server"]
-    MODE -->|full| F1["baseline → dense+hybrid"]
+    User->>UI: Query + model + optional weights
+    UI->>API: search payload
+    API->>IR: search()
 
-    B1 --> B2["Preprocess docs & queries"]
-    B2 --> B3["Build inverted index"]
-    B3 --> B4["Retrieve: BM25 + TF-IDF"]
-    B4 --> B5["Evaluate: MAP, Recall, P@10, nDCG"]
-    B5 --> OUT1[("results/baseline/")]
+    IR->>IR: _ensure_loaded()
 
-    D1 --> D2["Build / load FAISS index"]
-    D2 --> D3["Retrieve: embedding + hybrid"]
-    D3 --> D4["Compare all models"]
-    D4 --> OUT2[("results/dense/")]
+    opt use_refinement = true
+        IR->>REF: refine(tokens)
+        REF->>RET: BM25 top-5 for PRF
+        REF-->>IR: expanded tokens
+    end
 
-    T1 --> OUT3[("results/bm25_tuning/\nmodels/bm25_params.json")]
+    IR->>PRE: process_text(query)
 
-    R1 --> OUT4[("results/refinement/")]
+    alt bm25 / tfidf
+        IR->>RET: lexical retrieve
+    else embedding
+        IR->>RET: FAISS search
+    else hybrid_serial
+        IR->>RET: BM25 top-100 → dense rerank
+    else hybrid_parallel
+        IR->>RET: BM25 + dense → RRF or weighted fusion
+    end
 
-    A1 --> OUT5["http://127.0.0.1:8000"]
+    RET-->>IR: ranked doc_ids + scores
+    loop each result
+        IR->>DB: get_document(doc_id)
+        DB-->>IR: original_content
+    end
+
+    IR-->>API: results + full_content
+    API-->>UI: JSON
+    UI-->>User: ranked list with full text
 ```
 
 ---
 
-## 5. Data Flow Diagram
+## 6. Retrieval Models Comparison
+
+```mermaid
+flowchart TB
+    Q["User Query"]
+
+    subgraph Lexical["Lexical Path"]
+        Q --> TOK["Tokenize + Stem"]
+        TOK --> BM25["BM25\nrank_bm25"]
+        TOK --> TFIDF["TF-IDF\nsklearn cosine"]
+    end
+
+    subgraph Dense["Dense Path"]
+        Q --> ENC["Sentence-Transformers\nencode query"]
+        ENC --> FAISS["FAISS\nnearest neighbors"]
+    end
+
+    subgraph Hybrid["Hybrid Path"]
+        BM25 --> HS["Hybrid Serial\nBM25 candidates → dense rerank"]
+        BM25 --> HP["Hybrid Parallel"]
+        FAISS --> HP
+        HP --> RRF["RRF fusion\ndefault"]
+        HP --> WGT["Weighted fusion\nUI bm25_weight + dense_weight"]
+    end
+
+    BM25 --> TOPK["Top-K Results"]
+    TFIDF --> TOPK
+    HS --> TOPK
+    RRF --> TOPK
+    WGT --> TOPK
+    FAISS --> TOPK
+```
+
+| Model | Method | Best for |
+|-------|--------|----------|
+| BM25 | Term matching + IDF | Exact word overlap |
+| TF-IDF | Cosine on sparse vectors | Baseline lexical |
+| Dense | Semantic embeddings | Paraphrases / synonyms |
+| Hybrid Serial | BM25 filter → dense rerank | Precision at top |
+| Hybrid Parallel | Both paths fused | Balance lexical + semantic |
+
+---
+
+## 7. Hybrid Parallel — Weighted Fusion
 
 ```mermaid
 flowchart LR
-    subgraph Input
-        Q["User Query"]
-        D["Documents\n(Quora pairs)"]
+    Q["Query"] --> B["BM25\n top-100"]
+    Q --> D["Dense\n top-100"]
+
+    B --> NB["Normalize BM25 scores\n0 to 1"]
+    D --> ND["Normalize dense scores\n0 to 1"]
+
+    NB --> FUSE["Fused score =\nbm25_weight × BM25_norm\n+ dense_weight × dense_norm"]
+    ND --> FUSE
+
+    FUSE --> SORT["Sort by fused score"]
+    SORT --> TOP["Top-K results"]
+
+    W["UI weights\ne.g. 0.7 / 0.3"] --> FUSE
+```
+
+**UI test:** same query with `1.0/0.0` vs `0.0/1.0` vs `0.5/0.5` — rank order should change.
+
+---
+
+## 8. Query Refinement Pipeline
+
+```mermaid
+flowchart TD
+    Q["Original query tokens"] --> SPELL["Spelling correction\nOOV → nearest vocab term"]
+    SPELL --> PRF["PRF expansion\nBM25 top-5 docs → add 8 terms"]
+    PRF --> HIST["History expansion\nterms from similar past queries"]
+    HIST --> RQ["Refined query tokens"]
+    RQ --> BM25["BM25 retrieve again"]
+
+    subgraph eval_note["On Quora eval"]
+        N1["Queries already clean"]
+        N2["Top-5 often not true duplicate"]
+        N3["History adds noise in batch eval"]
+        N4["MAP: 0.319 → 0.162"]
     end
 
-    subgraph Processing
-        P1["Clean & Tokenize"]
-        P2["Stem / Normalize"]
-        P3["Encode Embeddings"]
-    end
-
-    subgraph Indexes
-        I1["Inverted Index\nterm → doc:tf"]
-        I2["Vector Index\nFAISS IndexFlatIP"]
-    end
-
-    subgraph Retrieval
-        L["Lexical\nTF-IDF / BM25"]
-        V["Dense\nCosine similarity"]
-        H["Hybrid\nSerial / Parallel RRF"]
-    end
-
-    subgraph Output
-        RK["Ranked Results"]
-        MT["Evaluation Metrics"]
-    end
-
-    D --> P1 --> P2 --> I1
-    D --> P3 --> I2
-    Q --> P1
-    Q --> P3
-
-    I1 --> L
-    I2 --> V
-    L --> H
-    V --> H
-
-    L --> RK
-    V --> RK
-    H --> RK
-    RK --> MT
+    BM25 --> eval_note
 ```
 
 ---
 
-## 6. Component Map (Codebase)
+## 9. CLI Evaluation Pipeline
 
-```
-IR-2026-project/
-├── code/
-│   ├── main.py              # CLI orchestrator (baseline, dense, hybrid, tuning, refinement, api)
-│   ├── config.py            # Global configuration
-│   ├── data_loader.py       # ir-datasets loader
-│   ├── preprocessing.py     # Preprocessing Service
-│   ├── indexing.py          # Inverted Index Service
-│   ├── vector_index.py      # Vector Index Service (FAISS)
-│   ├── embeddings.py        # Sentence-transformers encoder
-│   ├── retrieval.py         # Retrieval Service (lexical, dense, hybrid)
-│   ├── query_refinement.py  # Query Refinement Service
-│   ├── evaluation.py        # Evaluation Service
-│   ├── bm25_tuning.py       # BM25 parameter tuning
-│   ├── api/app.py           # API Gateway (FastAPI)
-│   └── services/ir_system.py # SOA service orchestrator
-├── frontend/index.html        # Web search UI
-├── models/                    # Cached indexes & tuned params
-├── results/                   # Evaluation artifacts
-└── data/                      # Downloaded dataset (ir_datasets)
+```mermaid
+flowchart TD
+    START(["python main.py --mode MODE"]) --> MODE{Mode?}
+
+    MODE -->|baseline| BL["BM25 + TF-IDF eval"]
+    MODE -->|dense / hybrid| DE["All 5 models eval"]
+    MODE -->|full| FULL["baseline then dense+hybrid"]
+    MODE -->|tune-bm25| TU["Grid search k1 × b"]
+    MODE -->|refinement| RF["BM25 before vs after refinement"]
+    MODE -->|api| AP["Start FastAPI :8000"]
+
+    BL --> OUT1[("results/baseline/run_*/")]
+    DE --> OUT2[("results/dense/run_*/\nfull_comparison.json")]
+    FULL --> OUT1
+    FULL --> OUT2
+    TU --> OUT3[("results/bm25_tuning/\nmodels/bm25_params.json")]
+    RF --> OUT4[("results/refinement/\nbefore_after_analysis.json")]
+    AP --> OUT5["http://127.0.0.1:8000"]
 ```
 
 ---
 
-## 7. Design Principles (SOA)
+## 10. Dataset Structure (BEIR Quora)
 
-| Principle | How it is applied |
-|-----------|-------------------|
-| **Loose coupling** | UI and CLI talk to services only through REST API or `IRSystem` interface |
-| **Reusability** | Core modules (`retrieval`, `evaluation`, `preprocessing`) shared by CLI and API |
-| **Separation of concerns** | Each service has a single responsibility |
-| **Independent testing** | Each module can be run/tested separately (`main.py --mode ...`) |
-| **Scalability** | Vector index cached on disk; API loads indexes once at startup |
+```mermaid
+flowchart TB
+    subgraph BEIR["beir/quora/test"]
+        DOCS["Corpus\n522,931 questions\ncorpus.jsonl"]
+        QUERIES["Test queries\n10,000\nqueries.jsonl"]
+        QRELS["Relevance judgments\n15,675 pairs\ntest.qrels"]
+    end
+
+    subgraph Task["Retrieval task"]
+        T1["Given a query question"]
+        T2["Find duplicate/near-duplicate questions in corpus"]
+        T3["Score 1 = relevant in qrels"]
+    end
+
+    subgraph Example["Example"]
+        EXQ["Query 187:\nWhat causes a nightmare?"]
+        EXD["Doc 188:\nWhat causes nightmares that seem real?"]
+        EXQ -->|"relevant"| EXD
+    end
+
+    QUERIES --> Task
+    DOCS --> Task
+    QRELS --> Task
+    Task --> Example
+```
 
 ---
 
-## 8. How to render this diagram
+## 11. Cache Invalidation — When to Rebuild
 
-- **GitHub / VS Code:** Mermaid blocks render automatically in Markdown preview.
-- **Report (Word/PDF):** Paste diagrams into [mermaid.live](https://mermaid.live) and export as PNG/SVG.
-- **Presentation:** Use the exported PNG from section 1 (High-Level SOA) as the main architecture slide.
+```mermaid
+flowchart TD
+    CHANGE["What changed?"] --> C1["MAX_DOCS\n200K → full"]
+    CHANGE --> C2["Preprocessing\nstemming settings"]
+    CHANGE --> C3["BM25 k1/b after tuning"]
+    CHANGE --> C4["REBUILD_* flags\nin config.py"]
+    CHANGE --> C5["Delete cache files"]
+
+    C1 --> DEL["Delete documents.db\n+ models/*"]
+    C2 --> DEL
+    C3 --> DEL2["Delete bm25_cache.pkl\n+ metadata OR full models/"]
+    C4 --> DEL
+    C5 --> DEL
+
+    DEL --> REBUILD["Next run rebuilds\nclean from ir_datasets"]
+    DEL2 --> REBUILD
+```
+
+| Delete this | When |
+|-------------|------|
+| `data/documents.db` | Change doc count or preprocessing |
+| `models/*.pkl` | Lexical cache invalid |
+| `models/*.faiss` | Rebuild dense index |
+| `data/beir/` | Force re-download (usually keep) |
 
 ---
 
-*Generated for IR Project 2026 — matches the current codebase structure.*
+## 12. End-to-End Data Lifecycle
+
+```mermaid
+flowchart LR
+    A["1. Download\nir_datasets"] --> B["2. Preprocess\nNLTK"]
+    B --> C["3. Save\nSQLite"]
+    C --> D["4. Index\nBM25 TF-IDF FAISS"]
+    D --> E["5. Search\nAPI or CLI"]
+    E --> F["6. Evaluate\nvs qrels"]
+    F --> G["7. Charts\nplot_results.py"]
+
+    style A fill:#e8f4fc
+    style C fill:#fff3cd
+    style D fill:#d4edda
+    style G fill:#f8d7da
+```
+
+---
+
+## Export for Report
+
+1. Open [mermaid.live](https://mermaid.live)
+2. Paste any diagram block
+3. Export **PNG** or **SVG**
+4. Recommended slides:
+   - **Section 1** — System architecture
+   - **Section 3** — Storage layers
+   - **Section 6** — Retrieval models
+   - **Section 10** — Dataset
+
+---
+
+*Updated for IR Project 2026 — includes SQLite storage, disk caches, hybrid weights, and refinement.*
